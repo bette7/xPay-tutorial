@@ -8,58 +8,184 @@
 /// For more guidance on Substrate modules, see the example module
 /// https://github.com/paritytech/substrate/blob/master/srml/example/src/lib.rs
 
-use support::{decl_module, decl_storage, decl_event, StorageValue, dispatch::Result};
+use support::{decl_module, decl_storage, decl_event, StorageValue, StorageMap, dispatch::Result, Parameter, ensure};
+use runtime_primitives::traits::{CheckedAdd, CheckedMul, As};
 use system::ensure_signed;
 
-/// The module's configuration trait.
-pub trait Trait: system::Trait {
-	// TODO: Add other types and constants required configure this module.
-
-	/// The overarching event type.
+pub trait Trait: cennzx_spot::Trait {
+	type Item: Parameter;
+	type ItemId: Parameter + CheckedAdd + Default + From<u8>;
 	type Event: From<Event<Self>> + Into<<Self as system::Trait>::Event>;
 }
 
+pub type BalanceOf<T> = <T as generic_asset::Trait>::Balance;
+pub type AssetIdOf<T> = <T as generic_asset::Trait>::AssetId;
+pub type PriceOf<T> = (AssetIdOf<T>, BalanceOf<T>);
+
+
 // This module's storage items.
 decl_storage! {
-	trait Store for Module<T: Trait> as TemplateModule {
-		// Just a dummy storage item. 
-		// Here we are declaring a StorageValue, `Something` as a Option<u32>
-		// `get(something)` is the default getter which returns either the stored `u32` or `None` if nothing stored
-		Something get(something): Option<u32>;
+	trait Store for Module<T: Trait> as XPay {
+		pub Items get(item): map T::ItemId => Option<T::Item>;
+		pub ItemOwners get(item_owner): map T::ItemId => Option<T::AccountId>;
+		pub ItemQuantities get(item_quantity): map T::ItemId => u32;
+		pub ItemPrices get(item_price): map T::ItemId => Option<PriceOf<T>>;
+		
+		pub NextItemId get(next_item_id): T::ItemId;
 	}
 }
 
 decl_module! {
-	/// The module declaration.
-	pub struct Module<T: Trait> for enum Call where origin: T::Origin {
-		// Initializing events
-		// this is needed only if you are using events in your module
-		fn deposit_event<T>() = default;
+  pub struct Module<T: Trait> for enum Call where origin: T::Origin {
+    // Use default implementation of deposit_event
+    fn deposit_event<T>() = default;
 
-		// Just a dummy entry point.
-		// function that can be called by the external world as an extrinsics call
-		// takes a parameter of the type `AccountId`, stores it and emits an event
-		pub fn do_something(origin, something: u32) -> Result {
-			// TODO: You only need this if you want to check it was signed.
-			let who = ensure_signed(origin)?;
+	pub fn create_item(origin, quantity: u32, item: T::Item, price_asset_id: AssetIdOf<T>, price_amount: BalanceOf<T>) -> Result {
+		// Ensure this is from user transaction
+		let origin = ensure_signed(origin)?;
 
-			// TODO: Code to execute when something calls this.
-			// For example: the following line stores the passed in u32 in the storage
-			<Something<T>>::put(something);
+		// Call a getter to access storage
+		let item_id = Self::next_item_id();
 
-			// here we are raising the Something event
-			Self::deposit_event(RawEvent::SomethingStored(something, who));
-			Ok(())
-		}
+		// The last available id serves as the overflow mark and won't be used.
+		// Use checked_add to avoid overflow
+		// Use ? operator to early exit on error
+		let next_item_id = item_id.checked_add(&1.into()).ok_or_else(||"No new item id is available.")?;
+
+		// Update stroage value
+		<NextItemId<T>>::put(next_item_id);
+		
+		let price = (price_asset_id, price_amount);
+			
+		// Update storage map
+		<Items<T>>::insert(item_id.clone(), item.clone());
+		<ItemOwners<T>>::insert(item_id.clone(), origin.clone());
+		<ItemQuantities<T>>::insert(item_id.clone(), quantity);
+		<ItemPrices<T>>::insert(item_id.clone(), price.clone());
+
+		// Emit an on-chain event
+		Self::deposit_event(RawEvent::ItemCreated(origin, item_id, quantity, item, price));
+
+		// Indicates method executed successfully
+		Ok(())
 	}
+
+	pub fn add_item(origin, item_id: T::ItemId, quantity: u32) -> Result {
+		// Ensure this is from user transaction
+		let origin = ensure_signed(origin)?;
+
+		// Modify storage
+		// Use saturating_add to avoid overflow
+		<ItemQuantities<T>>::mutate(item_id.clone(), |q| *q = q.saturating_add(quantity));
+
+		// Emit an on-chain event
+		Self::deposit_event(RawEvent::ItemAdded(origin, item_id.clone(), Self::item_quantity(item_id)));
+
+		// Indicates method executed successfully
+		Ok(())
+	}
+
+  pub fn remove_item(origin, item_id: T::ItemId, quantity: u32) -> Result {
+	// Ensure this is from user transaction
+  let origin = ensure_signed(origin)?;
+
+  // Modify storage
+  // Use saturating_sub to avoid underflow
+  <ItemQuantities<T>>::mutate(item_id.clone(), |q| *q = q.saturating_sub(quantity));
+
+  // Emit an on-chain event
+  Self::deposit_event(RawEvent::ItemRemoved(origin, item_id.clone(), Self::item_quantity(item_id)));
+
+  // Indicates method executed successfully
+  Ok(())
+}
+pub fn update_item(origin, item_id: T::ItemId, quantity: u32, price_asset_id: AssetIdOf<T>, price_amount: BalanceOf<T>) -> Result {
+    // Ensure this is from user transaction
+    let origin = ensure_signed(origin)?;
+
+    // ensure macro enforces precondition before continuting
+    ensure!(<Items<T>>::exists(item_id.clone()), "Item did not exist");
+
+    // Update item quantity
+    <ItemQuantities<T>>::insert(item_id.clone(), quantity);
+    
+    // Update item price
+    let price = (price_asset_id, price_amount);
+    <ItemPrices<T>>::insert(item_id.clone(), price.clone());
+
+    // Emit an on-chain event
+    Self::deposit_event(RawEvent::ItemUpdated(origin, item_id, quantity, price));
+
+    // Indicates method executed successfully
+    Ok(())
+}
+pub fn purchase_item(origin, quantity: u32, item_id: T::ItemId, paying_asset_id: AssetIdOf<T>, max_total_paying_amount: BalanceOf<T>) -> Result {
+	// Ensure this is from user transaction
+  let origin = ensure_signed(origin)?;
+
+  // Calcualte the new quantity after transaction
+  // Use checked_sub to ensure no underflow, which means user is trying to buy too many items
+  let new_quantity = Self::item_quantity(item_id.clone()).checked_sub(quantity).ok_or_else(||"Not enough quantity")?;
+  let item_price = Self::item_price(item_id.clone()).ok_or_else(||"No item price")?;
+  let seller = Self::item_owner(item_id.clone()).ok_or_else(||"No item owner")?;
+
+  // Calculate the total amount that merchant required for this tranaction
+  // Use checked_mul to ensure no overflow
+  let total_price_amount = item_price.1.checked_mul(&As::sa(quantity as u64)).ok_or_else(||"Total price overflow")?;
+
+  // Check if the paying asset is same as the desire receving asset
+  if item_price.0 == paying_asset_id {
+    // Same asset, GA transfer
+
+    // Ensure user is willing to pay enough of assets
+    ensure!(total_price_amount < max_total_paying_amount, "User paying price too low");
+
+    // Make a transfer via GenericAsset module
+    // Use of ? operator will trigger exit if the payment failed for any reasons
+    <generic_asset::Module<T>>::make_transfer_with_event(&item_price.0, &origin, &seller, total_price_amount)?;
+  } else {
+    // Different asset, CENNZX-Spot transfer
+
+    // Make a transfer via CENNZ-X Spot module
+    // Use of ? operator will trigger exit if the payment failed for any reasons
+    <cennzx_spot::Module<T>>::make_asset_swap_output(
+      &origin,             	// buyer
+      &seller,             	// recipient
+      &paying_asset_id,  		// asset_sold
+      &item_price.0,       	// asset_bought
+      item_price.1,       	// buy_amount
+      max_total_paying_amount,  // max_paying_amount
+      <cennzx_spot::Module<T>>::fee_rate() // fee_rate
+    )?;
+  }
+
+  // Update item quanity
+  <ItemQuantities<T>>::insert(item_id.clone(), new_quantity);
+
+  // Emit an on-chain event
+  Self::deposit_event(RawEvent::ItemSold(origin, item_id, quantity));
+
+  // Indicates method executed successfully
+  Ok(())
 }
 
 decl_event!(
-	pub enum Event<T> where AccountId = <T as system::Trait>::AccountId {
-		// Just a dummy event.
-		// Event `Something` is declared with a parameter of the type `u32` and `AccountId`
-		// To emit this event, we call the deposit funtion, from our runtime funtions
-		SomethingStored(u32, AccountId),
+	pub enum Event<T> where
+		<T as system::Trait>::AccountId,
+		<T as Trait>::Item,
+		<T as Trait>::ItemId,
+		Price = PriceOf<T>,
+	{
+		/// New item created. (transactor, item_id, quantity, item, price)
+		ItemCreated(AccountId, ItemId, u32, Item, Price),
+		/// More items added. (transactor, item_id, new_quantity)
+		ItemAdded(AccountId, ItemId, u32),
+		/// Items removed. (transactor, item_id, new_quantity)
+		ItemRemoved(AccountId, ItemId, u32),
+		/// Item updated. (transactor, item_id, new_quantity, new_price)
+		ItemUpdated(AccountId, ItemId, u32, Price),
+		/// Item sold. (transactor, item_id, quantity)
+		ItemSold(AccountId, ItemId, u32),
 	}
 );
 

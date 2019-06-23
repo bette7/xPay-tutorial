@@ -43,7 +43,6 @@ pub use generic_asset;
 
 mod fee;
 
-/// Used for the module template in `./template.rs`
 mod xpay;
 
 /// Opaque types. These are used by the CLI to instantiate machinery that don't need to know
@@ -237,8 +236,9 @@ impl cennzx_spot::Trait for Runtime {
 	type ExchangeAddressGenerator = ExchangeAddressGenerator<Self>;
 }
 
-/// Used for the module template in `./template.rs`
 impl xpay::Trait for Runtime {
+	type Item = u32;
+	type ItemId = u64;
 	type Event = Event;
 }
 
@@ -261,7 +261,6 @@ construct_runtime!(
 		Sudo: sudo,
 		Fees: fees::{Module, Call, Fee, Storage, Config<T>, Event<T>},
 		CennzxSpot: cennzx_spot::{Module, Call, Storage, Config<T>, Event<T>},
-		// Used for the module template in `./template.rs`
 		XPay: xpay::{Module, Call, Storage, Event<T>},
 	}
 );
